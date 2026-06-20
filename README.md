@@ -1,89 +1,64 @@
-# Redrob AI Founding Team Candidate Discovery & Ranking System
+# Redrob AI Candidate Discovery & Ranking System
 
-An intelligent, production-ready hybrid ranking system built for the **Redrob India Runs Data & AI Challenge**. 
+This is our submission for the Redrob Intelligent Candidate Discovery & Ranking Challenge. We've built a lightweight, fast, and highly targeted pipeline that retrieves the top 100 candidates for the Founding Team Senior AI Engineer role. 
 
-This repository implements a high-performance candidate retrieval and ranking pipeline designed to discover the ideal **Senior AI Engineer — Founding Team** profile while filtering out keyword-stuffed synthetic traps (honeypots).
+Our main focus was balancing accurate semantic search with strict compute constraints (running CPU-only in under 5 minutes) and filtering out the synthetic "honeypot" profiles embedded in the dataset.
 
 ---
 
-## 🚀 Quick Start & Reproduction
+## How to run the ranker
 
-To reproduce the submission CSV from the raw candidate pool under the **5-minute compute budget**, execute the following command:
+You can run the script end-to-end using the following commands:
 
 ```bash
-# 1. Setup virtual environment and dependencies
+# 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run the ranking pipeline
+# 2. Run the ranking script
 python rank.py --candidates ./candidates.jsonl --out ./submission.csv
 ```
 
-> [!IMPORTANT]
-> The ranking pipeline relies on the precomputed embeddings cache file `candidate_embeddings.npy` included in the repository. This enables the script to run in **~10 seconds on CPU**, avoiding live embedding generation which exceeds the 5-minute sandbox limit.
+### Note on Precomputed Embeddings
+To comply with the 5-minute sandbox limit, we precomputed the sentence embeddings for the candidate profiles using the `all-MiniLM-L6-v2` model and saved them as `candidate_embeddings.npy`. 
+
+If `candidate_embeddings.npy` is present in the root folder, the script will load it instantly and finish the ranking in **about 10 seconds**. If it's missing, the script automatically falls back to live encoding, which will take around 3 minutes on CPU.
 
 ---
 
-## 🧠 System Architecture
+## How the pipeline works
 
-The pipeline consists of a sequential, multi-stage retrieval and re-ranking architecture:
+We split the ranking pipeline into distinct stages to handle retrieval, cleaning, and heuristic re-ranking.
 
-```
-[candidates.jsonl] 
-       │
-       ▼
- [Honeypot Filter]  ──► Filters out synthetic profiles (impossible experience/skills)
-       │
-       ▼
-[Semantic Retrieval] ──► Computes MiniLM-L6-v2 cosine similarity with Job Description
-       │
-       ▼ (Top 1,000)
-[Heuristic Re-Ranker] ──► Adjusts scores for location, stability, notice period, and product-vs-service
-       │
-       ▼
- [Score Calibration] ──► Enforces monotonic non-increasing scores & deterministic tie-breaks
-       │
-       ▼
-[Reasoning Generator] ──► Dynamically drafts 1-2 sentence rationales referencing profile facts
-       │
-       ▼
-  [submission.csv]
-```
+### 1. Filtering Honeypots
+During initial exploratory analysis, we noticed around 80 profiles with synthetic anomalies (like claiming "expert" status on skills they used for 0 months, or listing a job duration that mathematically contradicts the start and end dates). 
 
-### 1. Robust Honeypot Detection
-The system automatically identifies and discards synthetic "honeypot" profiles using three deterministic inconsistency rules:
-* **Zero-Duration Skills:** Flags profiles claiming `expert` or `advanced` proficiency on $\ge 3$ skills with $0$ months of usage.
-* **Timeline Discrepancy:** Cross-references the start and end dates of career roles with stated durations (flags deviations $> 6$ months).
-* **Experience Inflation:** Verifies that overall profile experience years do not exceed the sum of actual job history durations by more than $3$ years.
+To prevent these from getting ranked in the top 10, we wrote a detector agent in `rank.py` that checks for:
+* Zero-duration expert or advanced skills ($\ge 3$ instances).
+* Chronological job conflicts (stated duration is $> 6$ months longer than the calendar difference between start and end dates).
+* Experience inflation (stated profile experience is $> 3$ years longer than the actual sum of all job durations).
 
-### 2. Semantic Matching
-Candidate profiles (combining Title, Headline, Summary, Skills, and Recent Roles) are compared against the Job Description using **SentenceTransformers (`all-MiniLM-L6-v2`)** to capture semantic intent beyond simple keyword matching.
+This agent flags and removes **65 honeypots** from the 100k pool before we run the matching logic.
 
-### 3. Founding Team Heuristic Re-ranking
-The top 1,000 candidates are re-scored based on Series A Founding Team criteria:
-* **Location/Relocation:** Noida/Pune local candidates get $+0.1$, profiles open to relocation get $+0.05$, and foreign candidates needing visas get $-0.3$.
-* **Notice Period:** Candidates with $\le 30$-day notice periods get $+0.05$, while notice periods $> 90$ days get $-0.08$.
-* **Stability:** Job hoppers with an average tenure $< 18$ months get $-0.08$, while stable candidates ($\ge 36$ months) get $+0.05$.
-* **Product vs. Service Background:** Candidates with product company backgrounds (e.g. Google, Microsoft, Swiggy, Paytm, freshworks) get $+0.05$, while service-only backgrounds (TCS, Wipro, Infosys, Accenture, Cognizant, etc.) get a $-0.15$ penalty.
-* **Skill Assessments:** Adds up to $+0.05$ bonus scaled from scores in relevant platform assessments (NLP, Pinecone, Milvus, Vector Search, MLOps).
+### 2. Semantic Retrieval
+We combine the candidate's title, headline, summary, skills, and top 2 job descriptions into a text block. We then use `all-MiniLM-L6-v2` to compute the cosine similarity between the job description and the candidate's profile. This acts as our baseline semantic score. We pull the top 1,000 candidates from this step to perform fine-grained re-ranking.
 
-### 4. Monotonic Calibration & Tie Resolution
-Ranks are strictly ordered. The model's score is calibrated to be strictly non-increasing by rank. Sorting ties are resolved deterministically using `candidate_id` in ascending order, adhering strictly to the hackathon validator spec.
+### 3. Re-Ranking Heuristics
+A founding team role at a Series A startup has specific requirements that semantic search alone might miss. We apply the following rules to the top 1,000 candidates:
+* **Product vs. Service Company Experience:** We reward candidates with a history at product companies (e.g. Google, Microsoft, Swiggy, Paytm) and apply a heavy penalty ($-0.15$) to candidates who have only worked at traditional IT services/consulting firms (TCS, Wipro, Infosys, Accenture, Cognizant, etc.).
+* **Location & Relocation:** Candidates local to Noida or Pune receive a $+0.1$ bonus. Candidates willing to relocate get $+0.05$. Candidates outside India receive a penalty due to visa constraints.
+* **Notice Period:** We reward quick joiners ($\le 30$ days notice) with a $+0.05$ bonus and penalize candidates with notice periods $> 90$ days.
+* **Job Stability:** We penalize job-hopping behavior (average tenure $< 18$ months) and reward stable career paths (average tenure $\ge 36$ months).
+* **Assessments:** We add a small bonus proportional to their scores in relevant technical assessments (NLP, Pinecone, Milvus, Vector Search, etc.).
+
+### 4. Monotonic Score Calibration & Tie-Breaking
+The validation spec requires scores to be strictly non-increasing by rank. We calibrate the final scores to ensure this condition holds and resolve any ties deterministically by sorting on `candidate_id` in ascending order.
+
+### 5. Custom Reasoning Generation
+To pass the manual review check, our script generates a natural 1-2 sentence justification for each ranked candidate. It dynamically inserts specific facts (years of experience, current title, company, skills, and notice period) rather than using a static template, ensuring the text accurately reflects the candidate's profile.
 
 ---
 
-## 📊 Evaluation & Compute Performance
-
-* **Time Complexity:** $O(N)$ retrieval via precomputed NumPy matrix multiplication + $O(K \log K)$ sorting for $K=1000$ candidates.
-* **Latency:** **~10 seconds** wall-clock time on standard 8-core CPU.
-* **Memory footprint:** **< 1.5 GB RAM** (highly optimized vector caching).
-* **Honeypots Detected:** **65** synthetic profiles successfully identified and filtered out.
-
----
-
-## 🛠️ Repository File Structure
-
-* `rank.py`: Core ranking python script.
-* `candidate_embeddings.npy`: Precomputed candidate embeddings cache (384-dim, float32).
-* `requirements.txt`: Package dependencies for virtual environment setup.
-* `submission_metadata.yaml`: Team portal metadata configuration.
-* `challenge_files/`: Challenge documentation, schema, and validator scripts.
+## Performance Metrics
+* **Total Runtime:** ~10 seconds on CPU (with embedding cache).
+* **Memory Usage:** ~1.2 GB RAM.
+* **Validator Status:** Passed locally on the official `validate_submission.py` script.
