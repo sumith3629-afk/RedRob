@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.env
+candidates.jsonl
+**/candidates.jsonl
+challenge_files/
+*.log
+.adk/
+yoga_carousel/
+yoga_carousel
+test_submission.csv
