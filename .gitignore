@@ -6,7 +6,7 @@ candidates.jsonl
 challenge_files/
 *.log
 .adk/
-yoga_carousel/
-yoga_carousel
 test_submission.csv
 *.pptx
+*.xlsx
+bhagvadgita.md
